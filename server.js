@@ -56,42 +56,46 @@ try{ const c=JSON.parse(fs.readFileSync(ADMIN_CFG_FILE,'utf8')); if(c&&typeof c.
 function persistAdmin(){ try{ fs.writeFileSync(ADMIN_CFG_FILE, JSON.stringify(adminCfg,null,2)); }catch(e){ console.error('persistAdmin fail:',e.message);} }
 let smsCodes={}; // phone -> {code, exp}
 let sessions={}; // token -> {user, phone, exp}
+// 调用阿里云 RPC 接口（短信类），真正解析响应：返回 ok:true 或 ok:false+error(阿里云原文)
+async function callAliyun(apiUrl, params){
+  const keys=Object.keys(params).sort();
+  const q=keys.map(k=>encodeURIComponent(k)+'='+encodeURIComponent(params[k])).join('&');
+  const strToSign='GET&'+encodeURIComponent('/')+'&'+encodeURIComponent(q);
+  const sig=crypto.createHmac('sha1',process.env.ALIYUN_SK+'&').update(strToSign).digest('base64');
+  const url=apiUrl+'?'+q+'&Signature='+encodeURIComponent(sig);
+  let resp;
+  try{ resp=await fetch(url); }catch(e){ return {ok:false, error:'网络请求异常：'+e.message}; }
+  let data={};
+  try{ data=await resp.json(); }catch(e){ return {ok:false, error:'响应解析失败（HTTP '+resp.status+'）'}; }
+  if(data.Code==='OK'){
+    // 部分接口（如 SendSmsVerifyCode）由阿里云生成验证码并通过 Data 返回，优先采用真码
+    const d=data.Data||{};
+    const realCode=d.Code||d.code||d.VerifyCode||d.verifyCode;
+    return {ok:true, code: realCode||undefined};
+  }
+  return {ok:false, error:(data.Message||data.Code||('HTTP '+resp.status))};
+}
+
 async function sendSms(phone,code){
   const p=process.env.SMS_PROVIDER;
   // 1) 阿里云传统短信服务（需自定义签名+模板，企业/有资质用户）
   if(p==='aliyun' && process.env.ALIYUN_AK && process.env.ALIYUN_SK && process.env.ALIYUN_SIGN && process.env.ALIYUN_TPL){
-    try{
-      const params={AccessKeyId:process.env.ALIYUN_AK,Action:'SendSms',Format:'JSON',PhoneNumbers:phone,RegionId:'cn-hangzhou',SignName:process.env.ALIYUN_SIGN,SignatureMethod:'HMAC-SHA1',SignatureNonce:Math.random().toString(36).slice(2),SignatureVersion:'1.0',Timestamp:new Date().toISOString(),TemplateCode:process.env.ALIYUN_TPL,TemplateParam:JSON.stringify({code}),Version:'2017-05-25'};
-      const keys=Object.keys(params).sort();
-      const q=keys.map(k=>encodeURIComponent(k)+'='+encodeURIComponent(params[k])).join('&');
-      const strToSign='GET&'+encodeURIComponent('/')+'&'+encodeURIComponent(q);
-      const sig=crypto.createHmac('sha1',process.env.ALIYUN_SK+'&').update(strToSign).digest('base64');
-      const url='https://dysmsapi.aliyuncs.com/?'+q+'&Signature='+encodeURIComponent(sig);
-      await fetch(url);
-      return {debug:false};
-    }catch(e){ return {debug:true,code}; }
+    const params={AccessKeyId:process.env.ALIYUN_AK,Action:'SendSms',Format:'JSON',PhoneNumbers:phone,RegionId:'cn-hangzhou',SignName:process.env.ALIYUN_SIGN,SignatureMethod:'HMAC-SHA1',SignatureNonce:Math.random().toString(36).slice(2),SignatureVersion:'1.0',Timestamp:new Date().toISOString(),TemplateCode:process.env.ALIYUN_TPL,TemplateParam:JSON.stringify({code}),Version:'2017-05-25'};
+    return await callAliyun('https://dysmsapi.aliyuncs.com', params);
   }
   // 2) 阿里云号码认证-短信认证（免资质，用平台赠送签名/模板，个人用户推荐）
   if(p==='aliyun-dypns' && process.env.ALIYUN_AK && process.env.ALIYUN_SK && process.env.ALIYUN_DYPNS_SIGN && process.env.ALIYUN_DYPNS_TPL){
-    try{
-      const params={AccessKeyId:process.env.ALIYUN_AK,Action:'SendSmsVerifyCode',Format:'JSON',PhoneNumber:phone,CountryCode:'86',SignName:process.env.ALIYUN_DYPNS_SIGN,SignatureMethod:'HMAC-SHA1',SignatureNonce:Math.random().toString(36).slice(2),SignatureVersion:'1.0',TemplateCode:process.env.ALIYUN_DYPNS_TPL,TemplateParam:JSON.stringify({code}),Timestamp:new Date().toISOString(),Version:'2017-05-25'};
-      const keys=Object.keys(params).sort();
-      const q=keys.map(k=>encodeURIComponent(k)+'='+encodeURIComponent(params[k])).join('&');
-      const strToSign='GET&'+encodeURIComponent('/')+'&'+encodeURIComponent(q);
-      const sig=crypto.createHmac('sha1',process.env.ALIYUN_SK+'&').update(strToSign).digest('base64');
-      const url='https://dypnsapi.aliyuncs.com/?'+q+'&Signature='+encodeURIComponent(sig);
-      await fetch(url);
-      return {debug:false};
-    }catch(e){ return {debug:true,code}; }
+    const params={AccessKeyId:process.env.ALIYUN_AK,Action:'SendSmsVerifyCode',Format:'JSON',PhoneNumber:phone,CountryCode:'86',SignName:process.env.ALIYUN_DYPNS_SIGN,SignatureMethod:'HMAC-SHA1',SignatureNonce:Math.random().toString(36).slice(2),SignatureVersion:'1.0',TemplateCode:process.env.ALIYUN_DYPNS_TPL,TemplateParam:JSON.stringify({code}),Timestamp:new Date().toISOString(),Version:'2017-05-25'};
+    return await callAliyun('https://dypnsapi.aliyuncs.com', params);
   }
   if(p==='twilio' && process.env.TWILIO_SID && process.env.TWILIO_TOKEN && process.env.TWILIO_FROM){
     try{
       const body=new URLSearchParams({To:phone,From:process.env.TWILIO_FROM,Body:'Your code is '+code+', valid for 5 minutes.'});
       await fetch('https://api.twilio.com/2010-04-01/Accounts/'+process.env.TWILIO_SID+'/Messages.json',{method:'POST',headers:{Authorization:'Basic '+Buffer.from(process.env.TWILIO_SID+':'+process.env.TWILIO_TOKEN).toString('base64')},body:body.toString()});
-      return {debug:false};
-    }catch(e){ return {debug:true,code}; }
+      return {ok:true};
+    }catch(e){ return {ok:false, error:'Twilio 请求失败：'+e.message}; }
   }
-  return {debug:true,code}; // 未配置短信服务：调试模式（前端明确标注非安全）
+  return {ok:true, debug:true, code}; // 未配置短信服务：调试模式（前端明确标注非安全）
 }
 
 const server=http.createServer((req,res)=>{
@@ -219,8 +223,10 @@ const server=http.createServer((req,res)=>{
       if(!/^1\d{10}$/.test(phone)) return send(400,{ok:false,reason:'badphone'});
       if(!adminCfg.phones.includes(phone)) return send(403,{ok:false,reason:'unauth'});
       const code=String(Math.floor(100000+Math.random()*900000));
-      smsCodes[phone]={code, exp:Date.now()+5*60*1000};
       const r=await sendSms(phone,code);
+      if(!r.ok){ console.error('[SMS] 发送失败 phone='+phone+' error='+r.error); return send(200,{ok:false, reason:'smsfail', detail:r.error}); }
+      const finalCode=r.code||code;
+      smsCodes[phone]={code:finalCode, exp:Date.now()+5*60*1000};
       return send(200,{ok:true, debug:r.debug, code:r.debug?code:undefined});
     });
     return;
