@@ -74,7 +74,7 @@ async function sendSms(phone,code){
   // 2) 阿里云号码认证-短信认证（免资质，用平台赠送签名/模板，个人用户推荐）
   if(p==='aliyun-dypns' && process.env.ALIYUN_AK && process.env.ALIYUN_SK && process.env.ALIYUN_DYPNS_SIGN && process.env.ALIYUN_DYPNS_TPL){
     try{
-      const params={AccessKeyId:process.env.ALIYUN_AK,Action:'SendSmsVerifyCode',Format:'JSON',PhoneNumber:phone,CountryCode:'86',SignName:process.env.ALIYUN_DYPNS_SIGN,SignatureMethod:'HMAC-SHA1',SignatureNonce:Math.random().toString(36).slice(2),SignatureVersion:'1.0',TemplateCode:process.env.ALIYUN_DYPNS_TPL,TemplateParam:JSON.stringify({code,min:'5'}),Timestamp:new Date().toISOString(),Version:'2017-05-25'};
+      const params={AccessKeyId:process.env.ALIYUN_AK,Action:'SendSmsVerifyCode',Format:'JSON',PhoneNumber:phone,CountryCode:'86',SignName:process.env.ALIYUN_DYPNS_SIGN,SignatureMethod:'HMAC-SHA1',SignatureNonce:Math.random().toString(36).slice(2),SignatureVersion:'1.0',TemplateCode:process.env.ALIYUN_DYPNS_TPL,TemplateParam:JSON.stringify({code}),Timestamp:new Date().toISOString(),Version:'2017-05-25'};
       const keys=Object.keys(params).sort();
       const q=keys.map(k=>encodeURIComponent(k)+'='+encodeURIComponent(params[k])).join('&');
       const strToSign='GET&'+encodeURIComponent('/')+'&'+encodeURIComponent(q);
@@ -175,6 +175,20 @@ const server=http.createServer((req,res)=>{
       if(used.has(key)) return send(200,{ok:false,reason:'used'});
       used.add(key); persistUsed();
       return send(200,{ok:true,expires:found.expires});
+    });
+    return;
+  }
+
+  // 只读校验（门控复核用）：查白名单 + 返回有效期，不触发占用（不影响跨设备占用逻辑）
+  if(req.method==='POST' && url==='/api/check'){
+    let body='';
+    req.on('data',c=>body+=c);
+    req.on('end',()=>{
+      let key=''; try{ key=(JSON.parse(body)||{}).key||''; }catch(e){}
+      if(!key) return send(400,{ok:false,reason:'bad'});
+      const found=findKey(key);
+      if(!found) return send(200,{ok:false,reason:'invalid'});
+      return send(200,{ok:true,expires:found.expires||'2099-12-31'});
     });
     return;
   }
