@@ -1,13 +1,21 @@
-# phd-key-api —— 密钥单设备占用服务
+# phd-key-api —— 密钥管理后端
 
-极简零依赖 Node 服务，实现「一个密钥全局只允许一台设备进入」：
-谁先用，谁绑定；第二台设备再输入同一密钥，后端返回 `used` 直接拒绝。
+极简零依赖 Node 服务，为工作台提供「访问密钥」的实时管理：
+- **合法密钥白名单（keys）**：由密钥后台 `admin.html` 实时增删
+- **跨设备占用（used）**：一个密钥全局只允许一台设备进入
+
+工作台门控不再把白名单写死在前端源码，而是实时查询本后端——
+后台生成 / 删除密钥即时生效，**无需重部署前端**。
 
 ## 接口
-- `GET  /`                      健康检查，返回 `{"ok":true}`
-- `POST /api/use`   body `{key}` 首次占用 `{ok:true}`，已占用 `{ok:false,reason:"used"}`
-- `GET  /api/used`              查看已占用密钥列表（排查用）
-- `DELETE /api/use/<key>`  header `x-admin-token: <ADMIN_TOKEN>` 释放某密钥（换设备/误占时用）
+- `GET  /`                                  健康检查 `{"ok":true,service:"phd-key-api"}`
+- `GET  /api/keys?key=<key>`                查某密钥是否合法（门控用，无需 token）：`{ok:true,key,label,expires}` 或 `{ok:false}`
+- `GET  /api/keys`                          列出全部合法密钥（需 `x-admin-token`）
+- `POST /api/keys`  body `{key,label,expires}`  添加（需 `x-admin-token`）：`{ok:true}` / `{ok:false,reason:"exists"}`
+- `DELETE /api/keys/<key>`                  删除合法密钥（需 `x-admin-token`）；同时清其占用
+- `POST /api/use`  body `{key}`             占用（门控用）：合法且未占用 `{ok:true,expires}`，已占用 `{ok:false,reason:"used"}`，不在白名单 `{ok:false,reason:"invalid"}`
+- `GET  /api/used`                          已占用列表（需 `x-admin-token`）
+- `DELETE /api/use/<key>`                   释放占用（需 `x-admin-token`，换设备用）
 
 CORS 已放开（`*`），前端跨域调用无需额外配置。
 
@@ -18,29 +26,39 @@ ADMIN_TOKEN=my-secret node server.js
 ```
 
 ## 部署（任选其一）
+### A. Railway
+1. GitHub 新建仓库（如 `phd-key-api`），把本目录文件传上去：
+   `server.js` `package.json` `Procfile` `railway.json` `README.md` `.gitignore`
+   （**不要传 keys.json / used.json**——运行时自动生成，已写进 .gitignore）。
+2. railway.app → GitHub 登录 → New Project → Deploy from GitHub repo → 选该仓库。
+3. 自动识别 Node，执行 `npm start`，读 `PORT`。
+4. Variables 添加 `ADMIN_TOKEN`（记好，后台增删密钥 / 释放占用要用）。
+5. 部署完拿 URL → 填进 phd_workspace.html 的 `KEY_API_BASE` 并重新部署前端。
 
-### A. Railway（你提的平台）
-1. 在 GitHub 新建仓库（如 `phd-key-api`），把本目录文件传上去
-   （`server.js` `package.json` `Procfile` `railway.json`，**不要传 used.json**）。
-2. 打开 https://railway.app → 用 GitHub 登录 → New Project → Deploy from GitHub repo → 选该仓库。
-3. Railway 自动识别 Node，执行 `npm start`，读取 `PORT` 环境变量。
-4. 项目内 Variables 添加 `ADMIN_TOKEN`（值随便一串，记好，换设备释放要用）。
-5. 部署完成拿到 URL（形如 `https://xxx.railway.app`）→ 发给搭工作台的人填进 `KEY_API_BASE`。
+### B. Render（免费、无需信用卡）
+1. 代码在 GitHub 仓库（同上）。
+2. render.com → New → Web Service → 连接仓库。
+3. Build Command 留空，Start Command `node server.js`，计划 Free。
+4. Environment 加 `ADMIN_TOKEN`。
+5. Deploy → 拿 URL。
 
-### B. Render（免费、无需信用卡，备选）
-1. 同样先把代码推到 GitHub 仓库。
-2. https://render.com → New → Web Service → 连接该仓库。
-3. Build Command 留空，Start Command 填 `node server.js`，计划选 Free。
-4. Environment 里加 `ADMIN_TOKEN`。
-5. Deploy → 拿到 URL 发我。
+## 密钥后台（admin.html）
+- 打开 `admin.html`（与工作台同域名 `/admin.html`），用管理员密码登录。
+- 填「后端地址」+「后端管理 Token（ADMIN_TOKEN）」→ 保存。
+- 点「生成密钥」→ 自动写入本后端白名单 → 线上即时可用。
+- 「密钥列表」实时从后端拉取；删除即时生效（线上立即失效）。
 
-## 注意
-- 平台容器磁盘是**临时性**的：每次重新部署会重置 `used.json`（密钥占用记录清空，
-  密钥会变回「可再次使用」）。你是单密钥自用、极少重部署，影响很小；
-  若需严格持久，可挂 Railway Volume 或接数据库（进阶，先不管）。
-- 换设备时先释放旧占用：
-  ```bash
-  curl -X DELETE https://你的地址/api/use/KPVEWG8S4883WASD \
-       -H "x-admin-token: 你的ADMIN_TOKEN"
-  ```
-  释放后新设备即可使用该密钥。
+## 数据持久化注意（重要）
+- `keys.json`（白名单）与 `used.json`（占用）存运行实例磁盘，已写进 `.gitignore`（不进 Git）。
+- 平台容器若被重建（重部署 / 实例回收），这两个文件会重置为空：
+  - 占用记录清空 → 已占用的密钥变回「可再次使用」（极少重部署，影响小）。
+  - **白名单清空 → 所有密钥失效**，需重新在后台生成；或把「永久主密钥」写死在
+    `server.js` 的 `DEFAULT_KEYS` 里（重部署不丢）。
+- 如需严格持久，可挂 Railway Volume / Render Disk 或接数据库（进阶）。
+
+## 换设备
+先释放旧占用：
+```bash
+curl -X DELETE https://你的地址/api/use/<key> -H "x-admin-token: 你的ADMIN_TOKEN"
+```
+释放后其他设备即可使用该密钥。
