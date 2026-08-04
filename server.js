@@ -58,6 +58,7 @@ let smsCodes={}; // phone -> {code, exp}
 let sessions={}; // token -> {user, phone, exp}
 async function sendSms(phone,code){
   const p=process.env.SMS_PROVIDER;
+  // 1) 阿里云传统短信服务（需自定义签名+模板，企业/有资质用户）
   if(p==='aliyun' && process.env.ALIYUN_AK && process.env.ALIYUN_SK && process.env.ALIYUN_SIGN && process.env.ALIYUN_TPL){
     try{
       const params={AccessKeyId:process.env.ALIYUN_AK,Action:'SendSms',Format:'JSON',PhoneNumbers:phone,RegionId:'cn-hangzhou',SignName:process.env.ALIYUN_SIGN,SignatureMethod:'HMAC-SHA1',SignatureNonce:Math.random().toString(36).slice(2),SignatureVersion:'1.0',Timestamp:new Date().toISOString(),TemplateCode:process.env.ALIYUN_TPL,TemplateParam:JSON.stringify({code}),Version:'2017-05-25'};
@@ -66,6 +67,19 @@ async function sendSms(phone,code){
       const strToSign='GET&'+encodeURIComponent('/')+'&'+encodeURIComponent(q);
       const sig=crypto.createHmac('sha1',process.env.ALIYUN_SK+'&').update(strToSign).digest('base64');
       const url='https://dysmsapi.aliyuncs.com/?'+q+'&Signature='+encodeURIComponent(sig);
+      await fetch(url);
+      return {debug:false};
+    }catch(e){ return {debug:true,code}; }
+  }
+  // 2) 阿里云号码认证-短信认证（免资质，用平台赠送签名/模板，个人用户推荐）
+  if(p==='aliyun-dypns' && process.env.ALIYUN_AK && process.env.ALIYUN_SK && process.env.ALIYUN_DYPNS_SIGN && process.env.ALIYUN_DYPNS_TPL){
+    try{
+      const params={AccessKeyId:process.env.ALIYUN_AK,Action:'SendSmsVerifyCode',Format:'JSON',PhoneNumber:phone,CountryCode:'86',SignName:process.env.ALIYUN_DYPNS_SIGN,SignatureMethod:'HMAC-SHA1',SignatureNonce:Math.random().toString(36).slice(2),SignatureVersion:'1.0',TemplateCode:process.env.ALIYUN_DYPNS_TPL,TemplateParam:JSON.stringify({code,min:'5'}),Timestamp:new Date().toISOString(),Version:'2017-05-25'};
+      const keys=Object.keys(params).sort();
+      const q=keys.map(k=>encodeURIComponent(k)+'='+encodeURIComponent(params[k])).join('&');
+      const strToSign='GET&'+encodeURIComponent('/')+'&'+encodeURIComponent(q);
+      const sig=crypto.createHmac('sha1',process.env.ALIYUN_SK+'&').update(strToSign).digest('base64');
+      const url='https://dypnsapi.aliyuncs.com/?'+q+'&Signature='+encodeURIComponent(sig);
       await fetch(url);
       return {debug:false};
     }catch(e){ return {debug:true,code}; }
