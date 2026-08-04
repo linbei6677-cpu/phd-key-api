@@ -85,7 +85,7 @@ async function sendSms(phone,code){
   }
   // 2) 阿里云号码认证-短信认证（免资质，用平台赠送签名/模板，个人用户推荐）
   if(p==='aliyun-dypns' && process.env.ALIYUN_AK && process.env.ALIYUN_SK && process.env.ALIYUN_DYPNS_SIGN && process.env.ALIYUN_DYPNS_TPL){
-    const params={AccessKeyId:process.env.ALIYUN_AK,Action:'SendSmsVerifyCode',Format:'JSON',PhoneNumber:phone,CountryCode:'86',SignName:process.env.ALIYUN_DYPNS_SIGN,SignatureMethod:'HMAC-SHA1',SignatureNonce:Math.random().toString(36).slice(2),SignatureVersion:'1.0',TemplateCode:process.env.ALIYUN_DYPNS_TPL,TemplateParam:JSON.stringify({code}),Timestamp:new Date().toISOString(),Version:'2017-05-25'};
+    const params={AccessKeyId:process.env.ALIYUN_AK,Action:'SendSmsVerifyCode',Format:'JSON',PhoneNumber:phone,CountryCode:'86',SignName:process.env.ALIYUN_DYPNS_SIGN,SignatureMethod:'HMAC-SHA1',SignatureNonce:Math.random().toString(36).slice(2),SignatureVersion:'1.0',TemplateCode:process.env.ALIYUN_DYPNS_TPL,TemplateParam:JSON.stringify({code,min:'5'}),Timestamp:new Date().toISOString(),Version:'2017-05-25'};
     return await callAliyun('https://dypnsapi.aliyuncs.com', params);
   }
   if(p==='twilio' && process.env.TWILIO_SID && process.env.TWILIO_TOKEN && process.env.TWILIO_FROM){
