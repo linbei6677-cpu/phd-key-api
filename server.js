@@ -10,11 +10,18 @@
 //   GET    /api/used               已占用列表（需 x-admin-token）
 //   DELETE /api/use/:key           释放占用（需 x-admin-token，换设备用）
 //   GET    /                       健康检查
+//   管理员登录（用户名 + 授权手机号 + 短信验证码，可绑多个手机号）：
+//   POST   /api/admin/send-code    发验证码（body {user,phone}），未配置短信服务时回显 code(debug)
+//   POST   /api/admin/verify       校验验证码并下发会话令牌（body {phone,code}）-> {ok,token,phones}
+//   GET    /api/admin/phones       授权手机号列表（需会话令牌）
+//   POST   /api/admin/phones       新增授权手机号（需会话令牌，body {phone}）
+//   DELETE /api/admin/phones/:p    移除授权手机号（需会话令牌，至少保留一个）
 //
 // 部署：连 GitHub 仓库，设环境变量 ADMIN_TOKEN（用于后台增删密钥/释放占用），启动 node server.js。
 //       前端 KEY_API_BASE 填本服务地址并重新部署，门控即实时依赖本后端。
 
 const http=require('http');
+const crypto=require('crypto');
 const fs=require('fs');
 const path=require('path');
 
@@ -35,12 +42,48 @@ function persistKeys(){ try{ fs.writeFileSync(KEYS_FILE, JSON.stringify(keys,nul
 function persistUsed(){ try{ fs.writeFileSync(USED_FILE, JSON.stringify([...used])); }catch(e){ console.error('persistUsed fail:',e.message);} }
 
 function findKey(k){ return keys.find(x=>x.key===k); }
-function adminOk(req){ const tk=req.headers['x-admin-token']; return !!process.env.ADMIN_TOKEN && tk===process.env.ADMIN_TOKEN; }
+function adminOk(req){
+  const tk=req.headers['x-admin-token'];
+  if(!!process.env.ADMIN_TOKEN && tk===process.env.ADMIN_TOKEN) return true;
+  if(tk && sessions[tk] && sessions[tk].exp>Date.now()) return true;
+  return false;
+}
+
+// ---- 管理员登录：用户名 + 授权手机号 + 短信验证码 ----
+const ADMIN_CFG_FILE=path.join(__dirname,'admin.json');
+let adminCfg={user:process.env.ADMIN_USER||'admin', phones:(process.env.ADMIN_PHONES||'').split(',').map(s=>s.trim()).filter(Boolean)};
+try{ const c=JSON.parse(fs.readFileSync(ADMIN_CFG_FILE,'utf8')); if(c&&typeof c.user==='string') adminCfg=c; }catch(e){}
+function persistAdmin(){ try{ fs.writeFileSync(ADMIN_CFG_FILE, JSON.stringify(adminCfg,null,2)); }catch(e){ console.error('persistAdmin fail:',e.message);} }
+let smsCodes={}; // phone -> {code, exp}
+let sessions={}; // token -> {user, phone, exp}
+async function sendSms(phone,code){
+  const p=process.env.SMS_PROVIDER;
+  if(p==='aliyun' && process.env.ALIYUN_AK && process.env.ALIYUN_SK && process.env.ALIYUN_SIGN && process.env.ALIYUN_TPL){
+    try{
+      const params={AccessKeyId:process.env.ALIYUN_AK,Action:'SendSms',Format:'JSON',PhoneNumbers:phone,RegionId:'cn-hangzhou',SignName:process.env.ALIYUN_SIGN,SignatureMethod:'HMAC-SHA1',SignatureNonce:Math.random().toString(36).slice(2),SignatureVersion:'1.0',Timestamp:new Date().toISOString(),TemplateCode:process.env.ALIYUN_TPL,TemplateParam:JSON.stringify({code}),Version:'2017-05-25'};
+      const keys=Object.keys(params).sort();
+      const q=keys.map(k=>encodeURIComponent(k)+'='+encodeURIComponent(params[k])).join('&');
+      const strToSign='GET&'+encodeURIComponent('/')+'&'+encodeURIComponent(q);
+      const sig=crypto.createHmac('sha1',process.env.ALIYUN_SK+'&').update(strToSign).digest('base64');
+      const url='https://dysmsapi.aliyuncs.com/?'+q+'&Signature='+encodeURIComponent(sig);
+      await fetch(url);
+      return {debug:false};
+    }catch(e){ return {debug:true,code}; }
+  }
+  if(p==='twilio' && process.env.TWILIO_SID && process.env.TWILIO_TOKEN && process.env.TWILIO_FROM){
+    try{
+      const body=new URLSearchParams({To:phone,From:process.env.TWILIO_FROM,Body:'Your code is '+code+', valid for 5 minutes.'});
+      await fetch('https://api.twilio.com/2010-04-01/Accounts/'+process.env.TWILIO_SID+'/Messages.json',{method:'POST',headers:{Authorization:'Basic '+Buffer.from(process.env.TWILIO_SID+':'+process.env.TWILIO_TOKEN).toString('base64')},body:body.toString()});
+      return {debug:false};
+    }catch(e){ return {debug:true,code}; }
+  }
+  return {debug:true,code}; // 未配置短信服务：调试模式（前端明确标注非安全）
+}
 
 const server=http.createServer((req,res)=>{
   res.setHeader('Access-Control-Allow-Origin','*');
   res.setHeader('Access-Control-Allow-Headers','Content-Type,x-admin-token');
-  res.setHeader('Access-Control-Allow-Methods','POST,GET,DELETE,OPTIONS');
+  res.setHeader('Access-Control-Allow-Methods','POST,GET,DELETE,PATCH,OPTIONS');
   if(req.method==='OPTIONS'){ res.writeHead(204); res.end(); return; }
 
   const send=(code,obj)=>{ res.writeHead(code,{'Content-Type':'application/json'}); res.end(JSON.stringify(obj)); };
@@ -88,6 +131,24 @@ const server=http.createServer((req,res)=>{
     return send(200,{ok:true});
   }
 
+  // 更新合法密钥（备注/有效期，后台管理用，需 token）
+  if(req.method==='PATCH' && url.startsWith('/api/keys/')){
+    if(!adminOk(req)) return send(403,{ok:false});
+    const key=decodeURIComponent(url.slice('/api/keys/'.length));
+    const found=findKey(key);
+    if(!found) return send(404,{ok:false,reason:'notfound'});
+    let body='';
+    req.on('data',c=>body+=c);
+    req.on('end',()=>{
+      let o={}; try{ o=JSON.parse(body)||{}; }catch(e){}
+      if(typeof o.label==='string') found.label=o.label;
+      if(typeof o.expires==='string' && o.expires) found.expires=o.expires;
+      persistKeys();
+      return send(200,{ok:true,item:found});
+    });
+    return;
+  }
+
   // 占用（门控用）：先校验白名单，再原子占用
   if(req.method==='POST' && url==='/api/use'){
     let body='';
@@ -116,6 +177,69 @@ const server=http.createServer((req,res)=>{
     const key=decodeURIComponent(url.slice('/api/use/'.length));
     used.delete(key); persistUsed();
     return send(200,{ok:true});
+  }
+
+  // ---- 管理员登录：用户名 + 授权手机号 + 短信验证码 ----
+  // 发送验证码（校验用户名与手机号是否已授权）
+  if(req.method==='POST' && url==='/api/admin/send-code'){
+    let body='';
+    req.on('data',c=>body+=c);
+    req.on('end',async()=>{
+      let o={}; try{ o=JSON.parse(body)||{}; }catch(e){}
+      const user=(o.user||'').trim(), phone=(o.phone||'').trim();
+      if(user!==adminCfg.user) return send(403,{ok:false,reason:'baduser'});
+      if(!/^1\d{10}$/.test(phone)) return send(400,{ok:false,reason:'badphone'});
+      if(!adminCfg.phones.includes(phone)) return send(403,{ok:false,reason:'unauth'});
+      const code=String(Math.floor(100000+Math.random()*900000));
+      smsCodes[phone]={code, exp:Date.now()+5*60*1000};
+      const r=await sendSms(phone,code);
+      return send(200,{ok:true, debug:r.debug, code:r.debug?code:undefined});
+    });
+    return;
+  }
+  // 校验验证码并下发会话令牌
+  if(req.method==='POST' && url==='/api/admin/verify'){
+    let body='';
+    req.on('data',c=>body+=c);
+    req.on('end',()=>{
+      let o={}; try{ o=JSON.parse(body)||{}; }catch(e){}
+      const phone=(o.phone||'').trim(), code=(o.code||'').trim();
+      const rec=smsCodes[phone];
+      if(!rec||rec.code!==code||Date.now()>rec.exp) return send(403,{ok:false,reason:'badcode'});
+      delete smsCodes[phone];
+      const token=crypto.randomBytes(16).toString('hex');
+      sessions[token]={user:adminCfg.user, phone, exp:Date.now()+2*60*60*1000};
+      return send(200,{ok:true, token, user:adminCfg.user, phones:adminCfg.phones});
+    });
+    return;
+  }
+  // 授权手机号列表（需会话令牌）
+  if(req.method==='GET' && url==='/api/admin/phones'){
+    if(!adminOk(req)) return send(403,{ok:false});
+    return send(200,{ok:true, phones:adminCfg.phones});
+  }
+  // 新增授权手机号（需会话令牌）
+  if(req.method==='POST' && url==='/api/admin/phones'){
+    if(!adminOk(req)) return send(403,{ok:false});
+    let body='';
+    req.on('data',c=>body+=c);
+    req.on('end',()=>{
+      let o={}; try{ o=JSON.parse(body)||{}; }catch(e){}
+      const phone=(o.phone||'').trim();
+      if(!/^1\d{10}$/.test(phone)) return send(400,{ok:false,reason:'badphone'});
+      if(!adminCfg.phones.includes(phone)){ adminCfg.phones.push(phone); persistAdmin(); }
+      return send(200,{ok:true, phones:adminCfg.phones});
+    });
+    return;
+  }
+  // 移除授权手机号（需会话令牌，至少保留一个）
+  if(req.method==='DELETE' && url.startsWith('/api/admin/phones/')){
+    if(!adminOk(req)) return send(403,{ok:false});
+    const phone=decodeURIComponent(url.slice('/api/admin/phones/'.length));
+    if(adminCfg.phones.length<=1) return send(400,{ok:false,reason:'keepone'});
+    adminCfg.phones=adminCfg.phones.filter(p=>p!==phone);
+    persistAdmin();
+    return send(200,{ok:true, phones:adminCfg.phones});
   }
 
   // 健康检查
