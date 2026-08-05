@@ -35,11 +35,21 @@ const DEFAULT_KEYS=[];
 
 let keys=[];
 try{ keys=JSON.parse(fs.readFileSync(KEYS_FILE,'utf8')); }catch(e){ keys=[...DEFAULT_KEYS]; }
-let used=new Set();
-try{ used=new Set(JSON.parse(fs.readFileSync(USED_FILE,'utf8'))); }catch(e){}
+let used=new Map();
+try{
+  const raw=JSON.parse(fs.readFileSync(USED_FILE,'utf8'));
+  if(Array.isArray(raw)) raw.forEach(k=>used.set(k,'legacy'));
+  else if(raw && typeof raw==='object') Object.entries(raw).forEach(([k,v])=>used.set(k,v));
+}catch(e){}
 
 function persistKeys(){ try{ fs.writeFileSync(KEYS_FILE, JSON.stringify(keys,null,2)); }catch(e){ console.error('persistKeys fail:',e.message);} }
-function persistUsed(){ try{ fs.writeFileSync(USED_FILE, JSON.stringify([...used])); }catch(e){ console.error('persistUsed fail:',e.message);} }
+function persistUsed(){
+  try{
+    const obj={};
+    used.forEach((v,k)=>obj[k]=v);
+    fs.writeFileSync(USED_FILE, JSON.stringify(obj));
+  }catch(e){ console.error('persistUsed fail:',e.message);}
+}
 
 function findKey(k){ return keys.find(x=>x.key===k); }
 function adminOk(req){
@@ -172,12 +182,13 @@ const server=http.createServer((req,res)=>{
     let body='';
     req.on('data',c=>body+=c);
     req.on('end',()=>{
-      let key=''; try{ key=(JSON.parse(body)||{}).key||''; }catch(e){}
+      let key='', deviceId=''; try{ const b=JSON.parse(body)||{}; key=b.key||''; deviceId=b.deviceId||''; }catch(e){}
       if(!key) return send(400,{ok:false,reason:'bad'});
       const found=findKey(key);
       if(!found) return send(200,{ok:false,reason:'invalid'});
-      if(used.has(key)) return send(200,{ok:false,reason:'used'});
-      used.add(key); persistUsed();
+      const occupant=used.get(key);
+      if(occupant && occupant!==deviceId) return send(200,{ok:false,reason:'used'});
+      used.set(key, deviceId||'unknown'); persistUsed();
       return send(200,{ok:true,expires:found.expires});
     });
     return;
@@ -200,7 +211,7 @@ const server=http.createServer((req,res)=>{
   // 已占用列表（后台管理用，需 token）
   if(req.method==='GET' && url==='/api/used'){
     if(!adminOk(req)) return send(403,{ok:false});
-    return send(200,[...used]);
+    return send(200,[...used.keys()]);
   }
 
   // 释放占用（后台管理用，需 token，换设备 / 误占时用）
